@@ -36,3 +36,37 @@
     transform: rotate(360deg);
   }
 }
+
+.fabric-button {
+  margin: 2px;
+}
+
+.fabric-buttons {
+  border-top: thin solid #CCC;
+  background: white;
+}
+
+.insert-drawing-button {
+  float: right;
+}
+
+.y-scrollable {
+  height: 100%;
+  min-height: 0;
+  overflow-y: scroll;
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
+}
+
+.fabric-palette-container {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 20px;
+}
+
+.fabric-color-palette {
+  display: inline;
+  display: grid;
+  grid-template-columns: 20px 20px 20px 20px;
+  grid-template-rows: 16px 16px ;
+}
