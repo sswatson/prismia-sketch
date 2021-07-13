@@ -15,6 +15,7 @@ import ImageIcon from '@material-ui/icons/Image';
 import RadioButtonUncheckedIcon from '@material-ui/icons/RadioButtonUnchecked';
 import CropSquareIcon from '@material-ui/icons/CropSquare';
 import FavoriteBorderOutlinedIcon from '@material-ui/icons/FavoriteBorderOutlined';
+import ArrowRightAltOutlinedIcon from '@material-ui/icons/ArrowRightAltOutlined';
 import FavoriteOutlinedIcon from '@material-ui/icons/FavoriteOutlined';
 import RemoveIcon from '@material-ui/icons/Remove';
 import FlipToFrontIcon from '@material-ui/icons/FlipToFront';
@@ -68,27 +69,13 @@ function polygonPositionHandler(dim, finalMatrix, fabricObject) {
 
 function lineActionHandler(eventData, transform, x, y) {
   const line = transform.target;
-  if (!window.hasLoggedLine) {
-    window.hasLoggedLine = true;
-  }
-  const linePoints = line.calcLinePoints();
-  const lineTransform = line.calcTransformMatrix();
-  const p1 = fabric.util.transformPoint({ x: linePoints.x1, y: linePoints.y1 }, lineTransform);
-  const p2 = fabric.util.transformPoint({ x: linePoints.x2, y: linePoints.y2 }, lineTransform);
+  const { lastDropped={} } = line;
+  const { x1=line.x1, y1=line.y1, 
+          x2=line.x2, y2=line.y2 } = lastDropped;
   if (line.__corner === 'p1') {
-    if (line.controlCache === 'p1' + line.top + line.left) {
-      line.set({ x1: x, y1: y });
-    } else {
-      line.set({ x1: x, y1: y, x2: p2.x, y2: p2.y });
-    }
-    line.controlCache = 'p1' + line.top + line.left;
+    line.set({ x1: x, y1: y, x2, y2 });
   } else {
-    if (line.controlCache === 'p2' + line.top + line.left) {
-      line.set({ x2: x, y2: y });
-    } else {
-      line.set({ x2: x, y2: y, x1: p1.x, y1: p1.y });
-    }
-    line.controlCache = 'p2' + line.top + line.left;
+    line.set({ x2: x, y2: y, x1, y1 });
   }
   return true;
 }
@@ -109,12 +96,13 @@ function polygonActionHandler(eventData, transform, x, y) {
 
 function anchorWrapper(anchorIndex, fn) {
   return function(eventData, transform, x, y) {
-    var fabricObject = transform.target,
+    const fabricObject = transform.target,
         absolutePoint = fabric.util.transformPoint({
             x: (fabricObject.points[anchorIndex].x - fabricObject.pathOffset.x),
             y: (fabricObject.points[anchorIndex].y - fabricObject.pathOffset.y),
         }, fabricObject.calcTransformMatrix()),
         actionPerformed = fn(eventData, transform, x, y),
+        newDim = fabricObject._setPositionDimensions({}),
         polygonBaseSize = fabricObject._getNonTransformedDimensions(),
         newX = (fabricObject.points[anchorIndex].x - fabricObject.pathOffset.x) / polygonBaseSize.x,
         newY = (fabricObject.points[anchorIndex].y - fabricObject.pathOffset.y) / polygonBaseSize.y;
@@ -148,10 +136,13 @@ class DrawingTool extends Component {
       pickerColor: null,
       menuOpenRef: null,
       sliderOpenRef: null,
+      decimateSliderOpenref: null,
       editorOpenRef: null,
       pickerOpenRef: null,
       strokeWidth: 3,
       isDrawingMode: false,
+      decimate: 4,
+      shouldOpenDecimate: false,
     };
   }
 
@@ -179,6 +170,10 @@ class DrawingTool extends Component {
     this.setState({ sliderOpenRef: event.currentTarget });
   }
 
+  openDecimateSlider(event) {
+    this.setState({ decimateSliderOpenRef: event.currentTarget });
+  }
+
   openPicker(event) {
     if (this.shouldOpenPicker) {
       this.setState( {pickerOpenRef: event.currentTarget});
@@ -190,6 +185,10 @@ class DrawingTool extends Component {
 
   closeSlider() {
     this.setState({ sliderOpenRef: null });
+  }
+
+  closeDecimateSlider() {
+    this.setState({ decimateSliderOpenRef: null });
   }
 
   closePicker() {
@@ -231,13 +230,24 @@ class DrawingTool extends Component {
       canvas.on('after:render', () => this.handleRender());
     } 
     canvas.on('mouse:down', (event) => this.handleMouseDown(event));
+    canvas.on('mouse:up', (event) => this.handleMouseUp(event));
     canvas.on('mouse:move', (event) => this.handleMouseMove(event));
     canvas.on('object:added', () => this.handleChange())
     canvas.on('object:modified', () => this.handleChange())
+    canvas.on('mouse:wheel', function(opt) {
+      const delta = opt.e.deltaY;
+      let zoom = canvas.getZoom();
+      zoom *= 0.999 ** delta;
+      if (zoom > 20) zoom = 20;
+      if (zoom < 0.01) zoom = 0.01;
+      canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
+      opt.e.preventDefault();
+      opt.e.stopPropagation();
+    });
     window.addEventListener('copy', this.handleCopy);
     window.addEventListener('paste', this.handlePaste);
     this.handleChange(); // need the very first board state in the revision history
-    this.canvas.freeDrawingBrush.decimate = 4;
+    this.canvas.freeDrawingBrush.decimate = this.state.decimate;
     Mousetrap.bind('mod+z', () => this.undo());
     Mousetrap.bind('mod+shift+z', () => this.undo(1));
     Mousetrap.bind('shift+p', () => this.toggleFreeDrawingMode());
@@ -248,18 +258,57 @@ class DrawingTool extends Component {
     Mousetrap.bind('shift+s', () => this.setState({strokeFill: 'stroke'}));
     Mousetrap.bind('shift+f', () => this.setState({strokeFill: 'fill'}));
     Mousetrap.bind('shift+t', () => this.addTextBox());
-    Mousetrap.bind('esc', () => this.closeActiveTools());
+    Mousetrap.bind('esc', () => this.escape());
+  }
+
+  escape() {
+    this.closeActiveTools();
+    this.canvas.discardActiveObject();
+    this.canvas.requestRenderAll();
+  }
+
+  handleMouseUp(event) {
+    if (this.isDragging) {
+      this.canvas.setViewportTransform(this.canvas.viewportTransform);
+      this.isDragging = false;
+      this.setCanvasSelection(true);
+    }
+    const activeObjects = this.canvas.getActiveObjects();
+    if (activeObjects.length === 1 && activeObjects[0].type === 'line') {
+      const line = activeObjects[0];
+      const linePoints = line.calcLinePoints();
+      const lineTransform = line.calcTransformMatrix();
+      const p1 = fabric.util.transformPoint({ x: linePoints.x1, y: linePoints.y1 }, lineTransform);
+      const p2 = fabric.util.transformPoint({ x: linePoints.x2, y: linePoints.y2 }, lineTransform);
+      line.lastDropped = { 
+        x1: p1.x - 1,
+        x2: p2.x - 1,
+        y1: p1.y - 1,
+        y2: p2.y - 1,
+      };
+    }
   }
 
   handleMouseDown(event) {
+    if (event.e.altKey) {
+      this.isDragging = true;
+      this.setCanvasSelection(false);
+      this.lastPosX = event.clientX;
+      this.lastPosY = event.clientY;
+      return;
+    }
     const p = this.canvas.getPointer(event.e);
+    this.setState({ shouldOpenDecimate: false });
     if (this.activeLine) {
       this.activeLine.setCoords();
       if (this.addArrowHead) {
         this.addArrow(this.activeLine, p);
       }
+      this.canvas.setActiveObject(this.activeLine);
       this.activeLine = null;
       this.handleChange();
+      this.closeActiveTools();
+      this.setCanvasSelection(true);
     } else if (this.isDrawingLine) {
       const line = new fabric.Line([p.x, p.y, p.x, p.y], {
         stroke: this.state.defaultColor,
@@ -292,6 +341,8 @@ class DrawingTool extends Component {
       this.activeCircle.setCoords();
       this.activeCircle = null;
       this.handleChange();
+      this.closeActiveTools();
+      this.setCanvasSelection(true);
     } else if (this.isDrawingCircle) {
       this.activeCircle = new fabric.Ellipse({
         left: p.x,
@@ -310,6 +361,8 @@ class DrawingTool extends Component {
       this.activeRect.setCoords();
       this.activeRect = null;
       this.handleChange();
+      this.closeActiveTools();
+      this.setCanvasSelection(true);
     } else if (this.isDrawingRect) {
       this.activeRect = new fabric.Rect({
         width: 0,
@@ -329,8 +382,8 @@ class DrawingTool extends Component {
     }
   }
 
-  newTextBox(x, y) {
-    return new fabric.Textbox('text', {
+  newTextBox(x, y, text='text') {
+    return new fabric.Textbox(text, {
       fontSize: 20,
       left: x,
       top: y,
@@ -348,10 +401,21 @@ class DrawingTool extends Component {
   }
 
   handleMouseMove(event) {
+    if (this.isDragging) {
+      const e = event.e;
+      const vpt = this.canvas.viewportTransform;
+      if (this.lastPosX) {
+        vpt[4] += e.clientX - this.lastPosX;
+        vpt[5] += e.clientY - this.lastPosY;
+        this.canvas.requestRenderAll();
+      }
+      this.lastPosX = e.clientX;
+      this.lastPosY = e.clientY;
+    }
     const p = this.canvas.getPointer(event.e);    
     if (this.activeLine) {
-      const theta = Math.atan2(this.activeLine.y1 - p.y, p.x - this.activeLine.x1);
-      const shift = 0.5 * this.activeLine.strokeWidth;
+      //const theta = Math.atan2(this.activeLine.y1 - p.y, p.x - this.activeLine.x1);
+      //const shift = 0.5 * this.activeLine.strokeWidth;
       const adjustment = {x: 0, y: 0};
       // let adjustment;
       // if (0 < theta && theta < Math.PI/2) {
@@ -426,6 +490,25 @@ class DrawingTool extends Component {
         } else {
           this.canvas.add(clonedObj);
         }
+        if (clonedObj.type === 'line') {
+          clonedObj.controls = {
+            p1: new fabric.Control({
+              positionHandler: linePositionHandler,
+              actionHandler: lineActionHandler,
+              actionName: 'modifyLine',
+              pointIndex: 0,
+              }), 
+            p2: new fabric.Control({
+                positionHandler: linePositionHandler,
+                actionHandler: lineActionHandler,
+                actionName: 'modifyLine',
+                pointIndex: 1,
+              }),
+            };
+          clonedObj.set('hasBorders', false);
+          clonedObj.set('cornerStyle', 'circle');
+          clonedObj.set('cornerColor', 'rgba(0,0,255,0.5)');
+        }
         this.clipboard.top += 10;
         this.clipboard.left += 10;
         this.canvas.setActiveObject(clonedObj);
@@ -467,6 +550,9 @@ class DrawingTool extends Component {
     Mousetrap.unbind('shift+s');
     Mousetrap.unbind('shift+f');
     Mousetrap.unbind('esc');
+    if (this.props.setMousetrap) {
+      this.props.setMousetrap();
+    }
     window.removeEventListener('copy', this.handleCopy);
     window.removeEventListener('paste', this.handlePaste);
   }
@@ -531,40 +617,10 @@ class DrawingTool extends Component {
     // may want copy and paste on different moment.
     // and you do not want the changes happened
     // later to reflect on the copy.
-    var poly = this.canvas.getActiveObjects()[0]; // TO DO
+    const poly = this.canvas.getActiveObjects()[0]; // TO DO
     poly.edit = !poly.edit;
     if (poly.edit) {
-      var lastControl = poly.points.length - 1;
-      poly.cornerStyle = 'circle';
-      poly.cornerColor = 'rgba(0,0,255,0.5)';
-      poly.controls = poly.points.reduce(function(acc, point, index) {
-        acc['p' + index] = new fabric.Control({
-          positionHandler: polygonPositionHandler,
-          actionHandler: anchorWrapper(index > 0 ? index - 1 : lastControl, polygonActionHandler),
-          actionName: 'modifyPolygon',
-          pointIndex: index
-        });
-        return acc;
-      }, { });
-    } else {
-      poly.cornerColor = 'blue';
-      poly.cornerStyle = 'rect';
-      poly.controls = fabric.Object.prototype.controls;
-    }
-    poly.hasBorders = !poly.edit;
-    poly.setCoords();
-    this.canvas.requestRenderAll();
-  }
-
-  editLine () {
-    // clone what are you copying since you
-    // may want copy and paste on different moment.
-    // and you do not want the changes happened
-    // later to reflect on the copy.
-    var poly = this.canvas.getActiveObjects()[0]; // TO DO
-    poly.edit = !poly.edit;
-    if (poly.edit) {
-      var lastControl = poly.points.length - 1;
+      const lastControl = poly.points.length - 1;
       poly.cornerStyle = 'circle';
       poly.cornerColor = 'rgba(0,0,255,0.5)';
       poly.controls = poly.points.reduce(function(acc, point, index) {
@@ -618,31 +674,8 @@ class DrawingTool extends Component {
       y2: line.y2 + 0.5*arrowsize*Math.sin(thetaReal),
     });
     const objs = [line, arrowHead];
-    var arrowObj = new fabric.Group(objs);
+    const arrowObj = new fabric.Group(objs);
     this.canvas.remove(line);
-    this.canvas.add(arrowObj);
-  }
-
-  addArrowOld() {
-    this.closeActiveTools();
-    const triangle = new fabric.Triangle({
-      width: 10, 
-      height: 15, 
-      fill: this.state.defaultColor,
-      left: 235, 
-      top: 65,
-      angle: 90,
-    });
-
-    const line = new fabric.Line([50, 100, 200, 100], {
-      left: 75,
-      top: 69,
-      stroke: this.state.defaultColor,
-      strokeWidth: 3,
-    });
-
-    const objs = [line, triangle];
-    var arrowObj = new fabric.Group(objs);
     this.canvas.add(arrowObj);
   }
 
@@ -689,7 +722,7 @@ class DrawingTool extends Component {
     this.canvas.getActiveObjects().forEach(obj => {
       if (obj.latexSource) {
         this.canvas.remove(obj);
-        this.canvas.add(this.newTextBox(obj.left, obj.top));
+        this.canvas.add(this.newTextBox(obj.left, obj.top, obj.latexSource));
         somethingHandled = true;
         return;
       }
@@ -762,13 +795,21 @@ class DrawingTool extends Component {
   }
 
   sendBackwards() {
-    this.applyToActive(obj => this.canvas.sendBackwards(obj));
+    this.applyToActive(obj => this.canvas.sendToBack(obj));
     this.canvas.discardActiveObject().renderAll();
   }
 
   bringForward() {
-    this.applyToActive(obj => this.canvas.bringForward(obj));
+    this.applyToActive(obj => this.canvas.sendToFront(obj));
     this.canvas.discardActiveObject().renderAll();
+  }
+
+  setObjectColor(object, color, strokeFill) {
+    if (object.type === 'textbox') {
+      object.set({stroke: color, fill: color});
+    } else {
+      object.set({[strokeFill]: color});
+    }
   }
 
   setColor(color) {
@@ -776,11 +817,14 @@ class DrawingTool extends Component {
     this.setState({ defaultColor: color });
     this.canvas.freeDrawingBrush.color = color;
     if (this.state.strokeFill) {
-      this.applyToActive(object => object.set({[this.state.strokeFill]: color}));
+      this.applyToActive(object => this.setObjectColor(object, color, this.state.strokeFill));
+    } else {
+      this.setState({strokeFill: 'stroke'}, () => {
+        this.applyToActive(object => this.setObjectColor(object, color, this.state.strokeFill));
+      })
     }
     this.applyToActive(object => {
       if (!object.latexSource) return;
-      console.log(JSON.parse(JSON.stringify(object)));
       try {
         compileLaTeX(object.latexSource, (svg, width, height) => {
           fabric.Image.fromURL(svg, (img) => {
@@ -830,9 +874,18 @@ class DrawingTool extends Component {
     this.applyToActive(obj => obj.set('strokeWidth', strokeWidth));
   }
 
+  adjustDecimate(decimate) {
+    this.canvas.freeDrawingBrush.decimate = decimate;
+  }
+
   handleStrokeWidthChange(strokeWidth) {
     this.setState({strokeWidth});
     this.adjustStrokeWidth(strokeWidth);
+  }
+
+  handleDecimateChange(decimate) {
+    this.setState({ decimate });
+    this.adjustDecimate(decimate); 
   }
 
   // Grouping doesn't work right now, apparently for reasons having to do with 
@@ -884,13 +937,13 @@ class DrawingTool extends Component {
           id={ this.id }>
         </canvas>
       </div>
-      <div className="fabric-buttons">
+      <div className="literally-canvas-buttons">
       { this.props.saveSketch ? <Button
         style={{margin: "10px", marginRight: "12px"}}
         variant="contained"
         color="primary"
         size="small"
-        className="insert-drawing-button fabric-button"
+        className="insert-drawing-button literally-canvas-button"
         onClick={ () => {
           this.sanitize(this.canvas.toSVG())
             .then(svg => this.props.saveSketch(svg))
@@ -905,7 +958,14 @@ class DrawingTool extends Component {
         <Button
           style={{minWidth: 0, padding: "13px", marginRight: "-10px"}}
           className="insert-drawing-button"
-          onClick={ () => this.toggleFreeDrawingMode() }>
+          onClick={ (event) => { 
+            if (this.state.shouldOpenDecimate) {
+              this.openDecimateSlider(event);
+            } else {
+              if (!this.state.isDrawingMode) this.setState({ shouldOpenDecimate: true });
+              this.toggleFreeDrawingMode();
+            }
+          }}>
           { this.state.isDrawingMode ? <CreateIcon
             style={ {color: "#777"} }
             /> : <CreateOutlinedIcon
@@ -913,6 +973,30 @@ class DrawingTool extends Component {
             />}
         </Button>
       </Tooltip>
+      <Popover
+        open={Boolean(this.state.decimateSliderOpenRef)}
+        anchorEl={this.state.decimateSliderOpenRef}
+        onClose={() => this.closeDecimateSlider() }
+        PaperProps={{
+          style: { width: '160px', padding: '45px 15px 5px 15px' },
+        }}
+        anchorOrigin={{
+          vertical: 'top',
+          horizontal: 'left',
+        }}
+        transformOrigin={{
+          vertical: 'bottom',
+          horizontal: 'left',
+        }}>
+        <Slider 
+          value={this.state.decimate} 
+          min={0.5}
+          max={100}
+          step={0.1}
+          valueLabelDisplay
+          onChange={(event, decimate) => this.handleDecimateChange(decimate)}
+          aria-labelledby="smoothness" />
+      </Popover>
       <Tooltip title="insert text or compile TeX [shift t]" enterDelay={ 500 }>
         <Button
           style={{minWidth: 0, padding: "13px", marginRight: "-10px"}}
@@ -1001,7 +1085,7 @@ class DrawingTool extends Component {
             />
         </Button>
       </Tooltip>
-      {/* <Popover
+      <Popover
         open={Boolean(this.state.editorOpenRef)}
         anchorEl={this.state.editorOpenRef}
         onClose={() => this.closeEditor() }
@@ -1017,7 +1101,7 @@ class DrawingTool extends Component {
           horizontal: 'left',
         }}>
         <div className='y-scrollable' style={{maxHeight: "400px", position: 'relative'}}>
-          <Editor
+          {/* <Editor
             className="jessiecode-editor"
             highlight={ code => highlight(code, languages.js)}
             value={ this.state.fabricCode }
@@ -1027,14 +1111,14 @@ class DrawingTool extends Component {
               fontFamily: '"Menlo", "Monaco", "Fira code", "Fira Mono", monospace',
               fontSize: 14,
               marginTop: 0,
-            }}/>
+            }}/> */}
           <Button 
               style={{position: 'absolute', top: '10px', right: '10px', color: 'white'}}
               onClick={ () => this.runCode() }>
                 run
           </Button>
         </div>
-      </Popover> */}
+      </Popover>
       <Menu
         open={ Boolean(this.state.menuOpenRef) }
         anchorEl={ this.state.menuOpenRef }
@@ -1089,7 +1173,7 @@ class DrawingTool extends Component {
                 minWidth: "4px",
                 border: '0.5px solid gray',
               }} 
-              onClick={() => this.setColor(name)}>
+              onClick={ () => this.setColor(name) }>
             </Button>
           ) }
           <Button style={{ 
@@ -1116,7 +1200,6 @@ class DrawingTool extends Component {
             }}>
             <ColorBox
               value={this.state.pickerColor} 
-              hideTextfield
               defaultValue='#555' 
               onChange={color => {
                 this.setState({pickerColor: color}); 
